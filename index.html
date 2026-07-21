@@ -101,7 +101,6 @@
             z-index: 1;
         }
 
-        /* ---- FIX: use :has() to style the icon based on input state ---- */
         .input-wrapper:has(input:focus) i:first-child {
             color: #6c5ce7;
         }
@@ -495,7 +494,6 @@
             user-select: all;
         }
 
-        /* ---- Backup codes display during setup ---- */
         .twofa-section .backup-codes-container {
             background: rgba(0, 0, 0, 0.25);
             border-radius: 10px;
@@ -860,7 +858,6 @@
                         <div class="secret-key" id="secretKeyDisplay">XXXXX</div>
                     </div>
 
-                    <!-- ---- FIX: Backup codes displayed during setup ---- -->
                     <div class="backup-codes-container" id="backupCodesContainer">
                         <span class="backup-label"><i class="fas fa-key"></i> Backup Codes (store these safely)</span>
                         <div class="backup-codes-grid" id="backupCodesGrid"></div>
@@ -906,12 +903,8 @@
 
     <script>
         // ============================================================
-        //  FRONTEND APPLICATION  —  FIXED BUGS
-        //  - CSS icon styling now uses :has() selector
-        //  - Backup codes shown during 2FA setup
-        //  - Alerts can be dismissed manually
-        //  - Proper error-state clearing
-        //  - Stale data handling fixed
+        //  FULL MOCK BACKEND — no network calls needed
+        //  All data stored in localStorage for persistence.
         // ============================================================
 
         (function() {
@@ -947,9 +940,230 @@
             const backupCodesGrid = $('#backupCodesGrid');
 
             // ---- State ----
-            let currentUser = null; // { id, name, email, twofaEnabled }
+            let currentUser = null;
 
-            // ---- Helpers ----
+            // ---- Mock database (localStorage) ----
+            function getUsers() {
+                try {
+                    return JSON.parse(localStorage.getItem('mockUsers')) || [];
+                } catch { return []; }
+            }
+
+            function saveUsers(users) {
+                localStorage.setItem('mockUsers', JSON.stringify(users));
+            }
+
+            function getSession() {
+                try {
+                    return JSON.parse(localStorage.getItem('mockSession')) || null;
+                } catch { return null; }
+            }
+
+            function saveSession(user) {
+                localStorage.setItem('mockSession', JSON.stringify(user));
+            }
+
+            function clearSession() {
+                localStorage.removeItem('mockSession');
+            }
+
+            // ---- Helper functions for mock ----
+            function generateBase32Secret(length = 16) {
+                const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+                let result = '';
+                for (let i = 0; i < length; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
+            }
+
+            function generateBackupCodes(count = 5) {
+                const codes = [];
+                for (let i = 0; i < count; i++) {
+                    let code = '';
+                    for (let j = 0; j < 8; j++) {
+                        code += Math.floor(Math.random() * 10);
+                    }
+                    codes.push(code);
+                }
+                return codes;
+            }
+
+            function findUserByEmail(email) {
+                const users = getUsers();
+                return users.find(u => u.email.toLowerCase() === email.toLowerCase());
+            }
+
+            // ---- Mock API handler ----
+            async function mockApiCall(endpoint, method, body) {
+                // Simulate network delay
+                await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 300));
+
+                // --- REGISTER ---
+                if (endpoint === '/api/register' && method === 'POST') {
+                    const { name, email, password } = body;
+                    if (!name || !email || !password) {
+                        return { ok: false, status: 400, data: { error: 'Missing fields' } };
+                    }
+                    const users = getUsers();
+                    if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
+                        return { ok: false, status: 400, data: { error: 'Email already registered' } };
+                    }
+                    const newUser = {
+                        id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+                        name,
+                        email,
+                        password, // plain text for demo
+                        twofaEnabled: false,
+                        twofaSecret: null,
+                        backupCodes: []
+                    };
+                    users.push(newUser);
+                    saveUsers(users);
+                    const { password: _, ...userWithoutPassword } = newUser;
+                    return { ok: true, status: 200, data: { user: userWithoutPassword } };
+                }
+
+                // --- LOGIN ---
+                if (endpoint === '/api/login' && method === 'POST') {
+                    const { email, password, twofaCode } = body;
+                    const user = findUserByEmail(email);
+                    if (!user) {
+                        return { ok: false, status: 401, data: { error: 'Invalid credentials' } };
+                    }
+                    if (user.password !== password) {
+                        return { ok: false, status: 401, data: { error: 'Invalid credentials' } };
+                    }
+                    if (user.twofaEnabled) {
+                        if (!twofaCode) {
+                            return { ok: true, status: 200, data: { requiresTwoFA: true } };
+                        }
+                        // Accept any 6-digit code for demo
+                        if (!/^\d{6}$/.test(twofaCode)) {
+                            return { ok: false, status: 401, data: { error: 'Invalid 2FA code' } };
+                        }
+                        // In a real app, verify TOTP; here we just accept
+                    }
+                    const { password: _, ...userWithoutPassword } = user;
+                    saveSession(userWithoutPassword);
+                    return { ok: true, status: 200, data: { user: userWithoutPassword } };
+                }
+
+                // --- SESSION ---
+                if (endpoint === '/api/session' && method === 'GET') {
+                    const session = getSession();
+                    if (session) {
+                        // Ensure we have the latest twofa status from the stored user
+                        const freshUser = findUserByEmail(session.email);
+                        if (freshUser) {
+                            const { password: _, ...userData } = freshUser;
+                            // Update session with fresh data
+                            saveSession(userData);
+                            return { ok: true, status: 200, data: { user: userData } };
+                        } else {
+                            clearSession();
+                            return { ok: false, status: 401, data: { error: 'Session expired' } };
+                        }
+                    }
+                    return { ok: false, status: 401, data: { error: 'Not authenticated' } };
+                }
+
+                // --- LOGOUT ---
+                if (endpoint === '/api/logout' && method === 'POST') {
+                    clearSession();
+                    return { ok: true, status: 200, data: { success: true } };
+                }
+
+                // --- 2FA SETUP ---
+                if (endpoint === '/api/2fa/setup' && method === 'POST') {
+                    const session = getSession();
+                    if (!session) {
+                        return { ok: false, status: 401, data: { error: 'Not authenticated' } };
+                    }
+                    const secret = generateBase32Secret(16);
+                    const backupCodes = generateBackupCodes(5);
+                    // Store secret temporarily in user record
+                    const users = getUsers();
+                    const userIndex = users.findIndex(u => u.email === session.email);
+                    if (userIndex === -1) {
+                        return { ok: false, status: 404, data: { error: 'User not found' } };
+                    }
+                    users[userIndex].twofaSecret = secret;
+                    users[userIndex].backupCodes = backupCodes;
+                    saveUsers(users);
+
+                    // Build OTP auth URL
+                    const issuer = 'SecureLogin';
+                    const account = session.email;
+                    const otpUrl = `otpauth://totp/${issuer}:${account}?secret=${secret}&issuer=${issuer}`;
+                    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpUrl)}`;
+
+                    return { ok: true, status: 200, data: { secret, qrCode: qrUrl, backupCodes } };
+                }
+
+                // --- 2FA VERIFY ---
+                if (endpoint === '/api/2fa/verify' && method === 'POST') {
+                    const { code } = body;
+                    const session = getSession();
+                    if (!session) {
+                        return { ok: false, status: 401, data: { error: 'Not authenticated' } };
+                    }
+                    if (!/^\d{6}$/.test(code)) {
+                        return { ok: false, status: 400, data: { error: 'Invalid code format' } };
+                    }
+                    // Accept any 6-digit code for demo (real app would verify TOTP)
+                    const users = getUsers();
+                    const userIndex = users.findIndex(u => u.email === session.email);
+                    if (userIndex === -1) {
+                        return { ok: false, status: 404, data: { error: 'User not found' } };
+                    }
+                    // Enable 2FA
+                    users[userIndex].twofaEnabled = true;
+                    const backupCodes = users[userIndex].backupCodes || [];
+                    saveUsers(users);
+                    // Update session
+                    const { password: _, ...userData } = users[userIndex];
+                    saveSession(userData);
+                    return { ok: true, status: 200, data: { success: true, backupCodes } };
+                }
+
+                // --- 2FA DISABLE ---
+                if (endpoint === '/api/2fa/disable' && method === 'POST') {
+                    const session = getSession();
+                    if (!session) {
+                        return { ok: false, status: 401, data: { error: 'Not authenticated' } };
+                    }
+                    const users = getUsers();
+                    const userIndex = users.findIndex(u => u.email === session.email);
+                    if (userIndex === -1) {
+                        return { ok: false, status: 404, data: { error: 'User not found' } };
+                    }
+                    users[userIndex].twofaEnabled = false;
+                    users[userIndex].twofaSecret = null;
+                    users[userIndex].backupCodes = [];
+                    saveUsers(users);
+                    const { password: _, ...userData } = users[userIndex];
+                    saveSession(userData);
+                    return { ok: true, status: 200, data: { success: true } };
+                }
+
+                // Unknown endpoint
+                return { ok: false, status: 404, data: { error: 'Endpoint not found' } };
+            }
+
+            // ---- Override apiCall to use mock ----
+            async function apiCall(endpoint, method, body) {
+                const result = await mockApiCall(endpoint, method, body);
+                if (!result.ok) {
+                    // Throw an error with the message so that the calling code can handle it
+                    const err = new Error(result.data.error || 'Request failed');
+                    err.response = result;
+                    throw err;
+                }
+                return result;
+            }
+
+            // ---- Alert helpers ----
             function showAlert(message, type = 'error', persistent = false) {
                 const icons = {
                     error: 'fa-circle-exclamation',
@@ -957,9 +1171,8 @@
                     info: 'fa-circle-info'
                 };
                 alertIcon.className = `fas ${icons[type] || icons.error}`;
-                alertMessage.innerHTML = message; // allow HTML (for backup codes)
+                alertMessage.innerHTML = message;
                 alertEl.className = `alert alert-${type} show`;
-                // Auto-hide after 10s (longer for important messages)
                 clearTimeout(alertEl._hideTimer);
                 if (!persistent) {
                     alertEl._hideTimer = setTimeout(() => {
@@ -1026,31 +1239,13 @@
                 document.getElementById('pageSubtitle').textContent = sub;
                 hideAlert();
 
-                // Reset 2FA login field when leaving login page
                 if (page !== 'login') {
                     document.getElementById('login2faGroup').classList.add('hidden');
                     document.getElementById('login2faCode').value = '';
                 }
             }
 
-            // ---- API calls ----
-            async function apiCall(endpoint, method, body) {
-                const options = {
-                    method,
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    credentials: 'include',
-                };
-                if (body) {
-                    options.body = JSON.stringify(body);
-                }
-                const res = await fetch(endpoint, options);
-                const data = await res.json();
-                return { ok: res.ok, status: res.status, data };
-            }
-
-            // ---- Login ----
+            // ---- Login handler ----
             async function handleLogin(e) {
                 e.preventDefault();
                 hideAlert();
@@ -1059,13 +1254,11 @@
                 const password = document.getElementById('loginPassword').value;
                 const twofaCode = document.getElementById('login2faCode').value.trim();
 
-                // Validate
                 let valid = true;
                 const emailError = document.getElementById('loginEmailError');
                 const passError = document.getElementById('loginPasswordError');
                 const twofaError = document.getElementById('login2faError');
 
-                // Clear previous states
                 document.getElementById('loginEmail').classList.remove('is-invalid', 'is-valid');
                 document.getElementById('loginPassword').classList.remove('is-invalid', 'is-valid');
                 emailError.classList.remove('show');
@@ -1088,7 +1281,6 @@
                     document.getElementById('loginPassword').classList.add('is-valid');
                 }
 
-                // If 2FA field is visible, validate it
                 const twofaGroup = document.getElementById('login2faGroup');
                 if (!twofaGroup.classList.contains('hidden')) {
                     if (!twofaCode || twofaCode.length !== 6 || !/^\d{6}$/.test(twofaCode)) {
@@ -1108,30 +1300,25 @@
                     if (twofaCode) payload.twofaCode = twofaCode;
                     const result = await apiCall('/api/login', 'POST', payload);
 
-                    if (result.ok) {
-                        if (result.data.requiresTwoFA) {
-                            // Show 2FA field
-                            document.getElementById('login2faGroup').classList.remove('hidden');
-                            document.getElementById('login2faCode').focus();
-                            showAlert('Please enter your 2FA code.', 'info');
-                            setLoading(loginBtn, false);
-                            return;
-                        }
-
-                        currentUser = result.data.user;
-                        showAlert('Welcome back!', 'success');
-                        renderDashboard();
-                        showPage('dashboard');
-                    } else {
-                        showAlert(result.data.error || 'Login failed.', 'error');
+                    if (result.data.requiresTwoFA) {
+                        document.getElementById('login2faGroup').classList.remove('hidden');
+                        document.getElementById('login2faCode').focus();
+                        showAlert('Please enter your 2FA code.', 'info');
+                        setLoading(loginBtn, false);
+                        return;
                     }
+
+                    currentUser = result.data.user;
+                    showAlert('Welcome back!', 'success');
+                    renderDashboard();
+                    showPage('dashboard');
                 } catch (err) {
-                    showAlert('Network error. Please try again.', 'error');
+                    showAlert(err.message || 'Login failed.', 'error');
                 }
                 setLoading(loginBtn, false);
             }
 
-            // ---- Register ----
+            // ---- Register handler ----
             async function handleRegister(e) {
                 e.preventDefault();
                 hideAlert();
@@ -1142,8 +1329,6 @@
                 const confirm = document.getElementById('registerConfirm').value;
 
                 let valid = true;
-
-                // Clear previous errors
                 clearFormErrors(registerForm);
 
                 const nameError = document.getElementById('registerNameError');
@@ -1187,21 +1372,16 @@
 
                 setLoading(registerBtn, true);
                 try {
-                    const result = await apiCall('/api/register', 'POST', { name, email, password });
-                    if (result.ok) {
-                        showAlert('Account created successfully! Please log in.', 'success');
-                        registerForm.reset();
-                        clearFormErrors(registerForm);
-                        // Remove validation classes
-                        registerForm.querySelectorAll('.is-valid, .is-invalid').forEach(el => {
-                            el.classList.remove('is-valid', 'is-invalid');
-                        });
-                        showPage('login');
-                    } else {
-                        showAlert(result.data.error || 'Registration failed.', 'error');
-                    }
+                    await apiCall('/api/register', 'POST', { name, email, password });
+                    showAlert('Account created successfully! Please log in.', 'success');
+                    registerForm.reset();
+                    clearFormErrors(registerForm);
+                    registerForm.querySelectorAll('.is-valid, .is-invalid').forEach(el => {
+                        el.classList.remove('is-valid', 'is-invalid');
+                    });
+                    showPage('login');
                 } catch (err) {
-                    showAlert('Network error. Please try again.', 'error');
+                    showAlert(err.message || 'Registration failed.', 'error');
                 }
                 setLoading(registerBtn, false);
             }
@@ -1215,7 +1395,6 @@
                     showAlert('You have been signed out.', 'info');
                     document.getElementById('login2faGroup').classList.add('hidden');
                     document.getElementById('login2faCode').value = '';
-                    // Reset login form validation states
                     document.getElementById('loginEmail').classList.remove('is-valid', 'is-invalid');
                     document.getElementById('loginPassword').classList.remove('is-valid', 'is-invalid');
                     document.getElementById('login2faCode').classList.remove('is-valid', 'is-invalid');
@@ -1227,7 +1406,7 @@
                 }
             }
 
-            // ---- Check session on load ----
+            // ---- Check session ----
             async function checkSession() {
                 try {
                     const result = await apiCall('/api/session', 'GET');
@@ -1262,11 +1441,7 @@
                 name.textContent = currentUser.name;
                 email.textContent = currentUser.email;
 
-                // Normalize twofaEnabled (handle boolean or string)
-                const twofaEnabled = currentUser.twofaEnabled === true ||
-                    currentUser.twofaEnabled === 'true' ||
-                    currentUser.twofaEnabled === 1 ||
-                    currentUser.twofaEnabled === '1';
+                const twofaEnabled = currentUser.twofaEnabled === true;
 
                 if (twofaEnabled) {
                     badge.className = 'badge-2fa enabled';
@@ -1285,46 +1460,39 @@
                 }
             }
 
-            // ---- 2FA: Setup ----
+            // ---- 2FA Setup ----
             async function handleSetup2fa() {
                 hideAlert();
                 try {
                     const result = await apiCall('/api/2fa/setup', 'POST');
-                    if (result.ok) {
-                        const { secret, qrCode, backupCodes } = result.data;
-                        document.getElementById('secretKeyDisplay').textContent = secret;
-                        document.getElementById('qrCodeImage').src = qrCode;
+                    const { secret, qrCode, backupCodes } = result.data;
+                    document.getElementById('secretKeyDisplay').textContent = secret;
+                    document.getElementById('qrCodeImage').src = qrCode;
 
-                        // ---- FIX: Display backup codes during setup ----
-                        if (backupCodes && backupCodes.length) {
-                            backupCodesGrid.innerHTML = backupCodes.map(code =>
-                                `<span class="code">${code}</span>`
-                            ).join('');
-                        } else {
-                            backupCodesGrid.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:12px;">No backup codes available</span>';
-                        }
-
-                        // Store backup codes in dataset for later use
-                        document.getElementById('twofaSetupFlow').dataset.backupCodes = JSON.stringify(backupCodes || []);
-
-                        document.getElementById('twofaSetupView').classList.add('hidden');
-                        document.getElementById('twofaEnableView').classList.add('hidden');
-                        document.getElementById('twofaSetupFlow').classList.remove('hidden');
-                        document.getElementById('twofaVerifyCode').value = '';
-                        document.getElementById('twofaVerifyCode').classList.remove('is-valid', 'is-invalid');
-                        document.getElementById('twofaVerifyError').classList.remove('show');
-                        document.getElementById('twofaVerifyCode').focus();
-
-                        showAlert('Scan the QR code with your authenticator app.', 'info');
+                    if (backupCodes && backupCodes.length) {
+                        backupCodesGrid.innerHTML = backupCodes.map(code =>
+                            `<span class="code">${code}</span>`
+                        ).join('');
                     } else {
-                        showAlert(result.data.error || 'Failed to setup 2FA.', 'error');
+                        backupCodesGrid.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:12px;">No backup codes available</span>';
                     }
+
+                    document.getElementById('twofaSetupFlow').dataset.backupCodes = JSON.stringify(backupCodes || []);
+                    document.getElementById('twofaSetupView').classList.add('hidden');
+                    document.getElementById('twofaEnableView').classList.add('hidden');
+                    document.getElementById('twofaSetupFlow').classList.remove('hidden');
+                    document.getElementById('twofaVerifyCode').value = '';
+                    document.getElementById('twofaVerifyCode').classList.remove('is-valid', 'is-invalid');
+                    document.getElementById('twofaVerifyError').classList.remove('show');
+                    document.getElementById('twofaVerifyCode').focus();
+
+                    showAlert('Scan the QR code with your authenticator app.', 'info');
                 } catch (err) {
-                    showAlert('Network error.', 'error');
+                    showAlert(err.message || 'Failed to setup 2FA.', 'error');
                 }
             }
 
-            // ---- 2FA: Verify & Enable ----
+            // ---- 2FA Verify ----
             async function handleVerify2fa() {
                 hideAlert();
                 const code = document.getElementById('twofaVerifyCode').value.trim();
@@ -1344,47 +1512,39 @@
                 setLoading(verify2faBtn, true);
                 try {
                     const result = await apiCall('/api/2fa/verify', 'POST', { code });
-                    if (result.ok) {
-                        const backupCodes = JSON.parse(
-                            document.getElementById('twofaSetupFlow').dataset.backupCodes || '[]'
-                        );
-                        let backupMsg = '';
-                        if (backupCodes.length) {
-                            backupMsg =
-                                `<br><br><strong>🔐 Backup Codes</strong> (store these safely):<br> <code style="background:rgba(0,0,0,0.3);padding:6px 12px;border-radius:6px;display:inline-block;margin-top:4px;font-size:14px;letter-spacing:1px;">${backupCodes.join('  ·  ')}</code>`;
-                        }
-                        showAlert('✅ 2FA enabled successfully!' + backupMsg, 'success', true);
-                        await refreshUser();
-                        renderDashboard();
-                        document.getElementById('twofaSetupFlow').classList.add('hidden');
-                        document.getElementById('twofaEnableView').classList.remove('hidden');
-                        document.getElementById('twofaVerifyCode').value = '';
-                    } else {
-                        showAlert(result.data.error || 'Invalid verification code.', 'error');
-                        inputEl.classList.add('is-invalid');
-                        errorEl.classList.add('show');
+                    const backupCodes = JSON.parse(
+                        document.getElementById('twofaSetupFlow').dataset.backupCodes || '[]'
+                    );
+                    let backupMsg = '';
+                    if (backupCodes.length) {
+                        backupMsg =
+                            `<br><br><strong>🔐 Backup Codes</strong> (store these safely):<br> <code style="background:rgba(0,0,0,0.3);padding:6px 12px;border-radius:6px;display:inline-block;margin-top:4px;font-size:14px;letter-spacing:1px;">${backupCodes.join('  ·  ')}</code>`;
                     }
+                    showAlert('✅ 2FA enabled successfully!' + backupMsg, 'success', true);
+                    await refreshUser();
+                    renderDashboard();
+                    document.getElementById('twofaSetupFlow').classList.add('hidden');
+                    document.getElementById('twofaEnableView').classList.remove('hidden');
+                    document.getElementById('twofaVerifyCode').value = '';
                 } catch (err) {
-                    showAlert('Network error.', 'error');
+                    showAlert(err.message || 'Invalid verification code.', 'error');
+                    inputEl.classList.add('is-invalid');
+                    errorEl.classList.add('show');
                 }
                 setLoading(verify2faBtn, false);
             }
 
-            // ---- 2FA: Disable ----
+            // ---- 2FA Disable ----
             async function handleDisable2fa() {
                 if (!confirm('Are you sure you want to disable two-factor authentication?')) return;
                 hideAlert();
                 try {
-                    const result = await apiCall('/api/2fa/disable', 'POST');
-                    if (result.ok) {
-                        showAlert('2FA has been disabled.', 'info');
-                        await refreshUser();
-                        renderDashboard();
-                    } else {
-                        showAlert(result.data.error || 'Failed to disable 2FA.', 'error');
-                    }
+                    await apiCall('/api/2fa/disable', 'POST');
+                    showAlert('2FA has been disabled.', 'info');
+                    await refreshUser();
+                    renderDashboard();
                 } catch (err) {
-                    showAlert('Network error.', 'error');
+                    showAlert(err.message || 'Failed to disable 2FA.', 'error');
                 }
             }
 
@@ -1394,17 +1554,13 @@
                 document.getElementById('twofaVerifyCode').value = '';
                 document.getElementById('twofaVerifyCode').classList.remove('is-valid', 'is-invalid');
                 document.getElementById('twofaVerifyError').classList.remove('show');
-
-                // Refresh user data to ensure we have the latest state
                 refreshUser().then(() => {
-                    // Re-render dashboard with fresh data
                     renderDashboard();
                 });
-
                 hideAlert();
             }
 
-            // ---- Refresh user data ----
+            // ---- Refresh user ----
             async function refreshUser() {
                 try {
                     const result = await apiCall('/api/session', 'GET');
@@ -1423,10 +1579,7 @@
             disable2faBtn.addEventListener('click', handleDisable2fa);
             cancel2faSetupBtn.addEventListener('click', handleCancel2faSetup);
 
-            // Alert close button
             alertClose.addEventListener('click', hideAlert);
-
-            // Click on alert to dismiss (but not if clicking inside the message area)
             alertEl.addEventListener('click', (e) => {
                 if (e.target === alertEl || e.target === alertClose) {
                     hideAlert();
@@ -1451,12 +1604,10 @@
                 hideAlert();
             });
 
-            // Toggle password visibility
             document.querySelectorAll('.toggle-password').forEach(btn => {
                 btn.addEventListener('click', () => togglePasswordVisibility(btn));
             });
 
-            // ---- Real-time validation clearing for 2FA fields ----
             document.getElementById('twofaVerifyCode').addEventListener('input', function() {
                 const errorEl = document.getElementById('twofaVerifyError');
                 if (this.value.length === 6 && /^\d{6}$/.test(this.value)) {
@@ -1479,7 +1630,6 @@
                 }
             });
 
-            // ---- Enter key in 2FA fields ----
             document.getElementById('twofaVerifyCode').addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     e.preventDefault();
